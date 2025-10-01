@@ -3,14 +3,20 @@ using Unity.Netcode;
 using UnityEngine.SceneManagement;
 using Unity.Services.Multiplayer;
 using System.Threading.Tasks;
-
+using System;
+using System.Linq;
 
 public class SessionManager : MonoBehaviour
 {
     public static SessionManager I;
 
+    public ISession CurrentSession { get; private set; }
+    public event Action<int> OnPlayerCountChanged;
+    [SerializeField] private string gameSceneName = "SampleScene";
+
     void Awake()
     {
+        //If it is being created another version then it destroy itself
         if (I != null) { Destroy(gameObject); return; }
         I = this; DontDestroyOnLoad(gameObject);
     }
@@ -21,17 +27,16 @@ public class SessionManager : MonoBehaviour
         try
         {
             var options = new SessionOptions { MaxPlayers = maxPlayers }.WithRelayNetwork();
-            var session = await MultiplayerService.Instance.CreateSessionAsync(options);
+            CurrentSession = await MultiplayerService.Instance.CreateSessionAsync(options);
 
-            Debug.Log($"Session created. Join code: {session.Code}");
 
-            // Load your gameplay scene
-            SceneManager.LoadScene("SampleScene");
+            WireSessionEvents(CurrentSession);
+            RaiseCount(); // initial count  
 
             // Return the code so UI can show it
-            return session.Code;
+            return CurrentSession.Code;
         }
-        catch (System.Exception ex)
+        catch (Exception ex)
         {
             Debug.LogError("Create host failed: " + ex.Message);
             return null;
@@ -39,16 +44,20 @@ public class SessionManager : MonoBehaviour
     }
 
     // CLIENT: join by code (will add real code next), then start client
-    public async System.Threading.Tasks.Task JoinAsClientAsync(string joinCode)
+    public async Task JoinAsClientAsync(string joinCode)
     {
-        // TODO: Join session + Relay via Multiplayer Services using the joinCode
-        // TODO: Configure UnityTransport with Relay data
-        var session = await MultiplayerService.Instance.JoinSessionByCodeAsync(joinCode);
+        try
+        {
+            CurrentSession = await MultiplayerService.Instance.JoinSessionByCodeAsync(joinCode);
+            WireSessionEvents(CurrentSession);
+            RaiseCount(); // initial
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("Join failed: " + ex.Message);
+        }
 
-        Debug.Log($"Joined session {session.Id}");
 
-        // When the connection is ready, move to the game
-        SceneManager.LoadScene("SampleScene");
     }
 
     // Host leaves or client wants to exit back to menu
@@ -58,5 +67,41 @@ public class SessionManager : MonoBehaviour
             NetworkManager.Singleton.Shutdown();
 
         SceneManager.LoadScene("MainMenu");
+    }
+
+    // Host-only: start the match → sync-load game scene for everyone
+    public void StartMatch()
+    {
+        if (NetworkManager.Singleton == null) { Debug.LogError("No NetworkManager."); return; }
+        //Only the host allow to start the match
+        if (!NetworkManager.Singleton.IsHost)
+        {
+            Debug.LogWarning("Only the host can start the match.");
+            return;
+        }
+
+
+        // Use NGO's SceneManager so clients load with the host
+        NetworkManager.Singleton.SceneManager.LoadScene(gameSceneName, LoadSceneMode.Single);
+    }
+    void WireSessionEvents(ISession s)
+    {
+        s.PlayerJoined += _ => RaiseCount();
+        s.PlayerLeaving += _ => RaiseCount();
+        s.Changed += () => RaiseCount();
+    }
+
+    void RaiseCount()
+    {
+        try
+        {
+            //If Count on the left is null then use 1 as the count
+            int count = CurrentSession?.Players?.Count() ?? 1;
+            OnPlayerCountChanged?.Invoke(count);
+        }
+        catch
+        {
+            OnPlayerCountChanged?.Invoke(1);
+        }
     }
 }
